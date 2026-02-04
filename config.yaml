@@ -1,0 +1,46 @@
+# Shell Guardian Configuration
+# v0.2
+
+# Domains allowed for pipe-to-shell without warning
+allowed_domains:
+  - get.docker.com
+  - sh.rustup.rs
+  - raw.githubusercontent.com
+  - brew.sh
+  - install.pi-hole.net
+  - getmic.ro
+  - deb.nodesource.com
+
+# Severity settings (block, warn, ignore)
+rules:
+  homograph_attack: block
+  pipe_to_shell: warn
+  ansi_injection: warn
+  dotfile_attack: block
+  insecure_http_pipe: block
+
+# Logging
+logging:
+  enabled: true
+  path: ~/.local/share/shell-guardian/audit.log
+  # What to log: all, blocked, warned, none
+  level: blocked
+
+# Bypass
+allow_bypass: true  # Allow GUARDIAN=0 prefix
+
+# Protected dotfiles (block writes to these)
+protected_dotfiles:
+  - .bashrc
+  - .zshrc
+  - .profile
+  - .bash_profile
+  - .ssh/authorized_keys
+  - .ssh/config
+  - .ssh/id_rsa
+  - .ssh/id_ed25519
+  - .gitconfig
+  - .npmrc
+  - .netrc
+  - .aws/credentials
+  - .kube/config

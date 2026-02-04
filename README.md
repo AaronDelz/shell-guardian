@@ -4,6 +4,10 @@
 
 *Built by Orion & Aaron — 2026-02-03*
 
+![Version](https://img.shields.io/badge/version-0.2.0-blue)
+![License](https://img.shields.io/badge/license-MIT-green)
+![Shell](https://img.shields.io/badge/shell-bash%20%7C%20zsh-orange)
+
 ---
 
 ## The Problem
@@ -170,13 +174,51 @@ ALLOWED_PIPE_DOMAINS=(
 - **Bypassable** — `GUARDIAN=0` for when you know what you're doing
 - **Open source** — Read every line, trust nothing blindly
 
-## Future Ideas (v0.2+)
+## v0.2 Features
+
+- ✅ **External config file** (`config.yaml`) — customize without editing code
+- ✅ **Audit logging** — track what Guardian blocked/warned
+- ✅ **Status command** — see your configuration at a glance
+- ✅ **50+ homograph characters** — Cyrillic, Greek, Armenian, and more
+- ✅ **Insecure HTTP blocking** — blocks HTTP (not HTTPS) pipe-to-shell
+
+### New Commands
+
+```bash
+guardian.sh status        # Show config, stats, protected files
+guardian.sh log           # Show last 10 blocked/warned commands  
+guardian.sh log 50        # Show last 50
+```
+
+### Configuration File
+
+Create `config.yaml` next to `guardian.sh`:
+
+```yaml
+# Trusted domains (no warnings)
+allowed_domains:
+  - get.docker.com
+  - sh.rustup.rs
+  - brew.sh
+
+# Files to protect from writes
+protected_dotfiles:
+  - .bashrc
+  - .ssh/authorized_keys
+  - .aws/credentials
+
+# Logging
+logging:
+  enabled: true
+  level: blocked  # all, blocked, warned, none
+```
+
+## Future Ideas (v0.3+)
 
 - [ ] Integration with OpenClaw approval system
-- [ ] Configurable rules via YAML
-- [ ] More homograph characters
-- [ ] Bash preexec support
+- [ ] Bash preexec support (without bash-preexec)
 - [ ] Fish shell support
+- [ ] Interactive mode (ask before proceeding)
 
 ---
 
