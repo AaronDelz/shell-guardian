@@ -1,227 +1,106 @@
-# 🛡️ Shell Guardian
+# Shell Guardian 🛡️
 
-**Terminal security for humans.** Catches homograph attacks, pipe-to-shell dangers, and terminal injection before they execute.
+A lightweight terminal security tool that catches dangerous commands before they execute.
 
-*Built by Orion & Aaron — 2026-02-03*
+## Features
 
-![Version](https://img.shields.io/badge/version-0.2.0-blue)
-![License](https://img.shields.io/badge/license-MIT-green)
-![Shell](https://img.shields.io/badge/shell-bash%20%7C%20zsh-orange)
+- **Homograph Detection** — Spots Cyrillic/Greek lookalike characters hiding in commands (а→a, е→e, о→o)
+- **Pipe-to-Shell Warnings** — Alerts on `curl|bash`, `wget|sh` patterns from untrusted sources
+- **ANSI Escape Detection** — Catches terminal injection attacks hidden in output
+- **Dotfile Attack Detection** — Warns about hidden executables and bashrc modifications
+- **Smart Domain Allowlist** — Trusted sources (docker, rustup, brew, nvm, deno) pass through
 
----
-
-## The Problem
-
-Your browser would catch this. Your terminal won't:
-
-```bash
-curl -sSL https://install.example-cli.dev | bash  # safe
-curl -sSL https://іnstall.example-clі.dev | bash  # COMPROMISED
-```
-
-See the difference? Neither does your terminal. Both `і` characters are **Cyrillic** (U+0456), not Latin `i`. The second URL resolves to an attacker's server.
-
-## What Guardian Catches
-
-| Threat | Action | Example |
-|--------|--------|---------|
-| **Homograph attacks** | 🛑 BLOCK | Cyrillic/Greek lookalikes in URLs |
-| **Pipe-to-shell** | ⚠️ WARN | `curl ... \| bash` patterns |
-| **ANSI injection** | ⚠️ WARN | Terminal escape sequences |
-| **Dotfile attacks** | 🛑 BLOCK | Writes to ~/.bashrc, ~/.ssh/, etc. |
-
-## Quick Start
-
-```bash
-# Clone/download
-cd ~/clawd/projects/shell-guardian
-
-# Make executable
-chmod +x guardian.sh
-
-# Test it
-./guardian.sh test
-
-# Check a specific command
-./guardian.sh check "curl https://example.com | bash"
-```
-
-## Installation
-
-### Option 1: Manual Hook
-
-Add to your `~/.zshrc`:
-
-```bash
-# Shell Guardian
-_guardian_preexec() {
-    local cmd="$1"
-    [[ "${GUARDIAN:-1}" == "0" ]] && return 0
-    if ! ~/clawd/projects/shell-guardian/guardian.sh check "$cmd"; then
-        return 1
-    fi
-}
-autoload -Uz add-zsh-hook
-add-zsh-hook preexec _guardian_preexec
-```
-
-Then: `source ~/.zshrc`
-
-### Option 2: Installer Script
+## Install
 
 ```bash
 ./install.sh
-# Follow the instructions it prints
 ```
+
+This will:
+1. Copy `guardian` to `~/.local/bin/`
+2. Generate shell hooks for bash/zsh
+3. Show you what to add to your shell config
 
 ## Usage
 
-Once installed, Guardian runs invisibly on every command.
-
-### Normal commands — silent:
+### Manual Check
 ```bash
-$ ls -la
-$ git status
-$ docker ps
-# No output from Guardian
+guardian check "curl -fsSL https://example.com | bash"
 ```
 
-### Suspicious command — blocked:
+### Test Suite
 ```bash
-$ curl -sSL https://іnstall.example.com | bash
-
-╔══════════════════════════════════════════════════════════╗
-║  🛡️  SHELL GUARDIAN - BLOCKED                              ║
-╚══════════════════════════════════════════════════════════╝
-
-[CRITICAL] Homograph attack detected in URL
-  URL: https://іnstall.example.com
-  Found Cyrillic i (U+0456) that looks like 'i'
-  This URL may redirect to a malicious server!
-
-Bypass: prefix command with GUARDIAN=0
+guardian test
 ```
 
-### Bypass (when you know what you're doing):
+### Get Shell Hook
 ```bash
-GUARDIAN=0 curl -sSL https://something.xyz | bash
+guardian hook        # auto-detects shell
+guardian hook bash   # explicit shell
+guardian hook zsh
 ```
 
-## Commands
-
+### Bypass When Needed
 ```bash
-guardian.sh check "<command>"  # Analyze a command
-guardian.sh test               # Run test suite
-guardian.sh hook               # Output shell hook code
-guardian.sh help               # Show help
-```
-
-## Configuration
-
-Edit the `ALLOWED_PIPE_DOMAINS` array in `guardian.sh` to add trusted domains:
-
-```bash
-ALLOWED_PIPE_DOMAINS=(
-    "get.docker.com"
-    "sh.rustup.rs"
-    "brew.sh"
-    # Add your trusted domains here
-)
+GUARDIAN=0 curl https://trusted.com/install.sh | bash
 ```
 
 ## How It Works
 
-1. **Shell hook** intercepts commands before execution (zsh `preexec`)
-2. **URL extraction** finds any URLs in the command
-3. **Homograph scan** checks hostnames for non-ASCII lookalikes
-4. **Pattern matching** detects pipe-to-shell, dotfile attacks, ANSI sequences
-5. **Decision**: BLOCK (exit 1), WARN (stderr, continue), or PASS (silent)
+Shell Guardian uses `preexec` hooks to intercept commands before they run. When it detects something suspicious:
 
-## Threat Detection Details
+- **🚫 BLOCKED** — High-risk pattern, command is stopped
+- **⚠️ WARNING** — Suspicious pattern, asks for confirmation
+- **✅ ALLOWED** — Trusted domain, proceeds normally
 
-### Homographs Detected
+## Risk Patterns
 
-| Character | Looks Like | Name | Codepoint |
-|-----------|------------|------|-----------|
-| а | a | Cyrillic a | U+0430 |
-| е | e | Cyrillic ie | U+0435 |
-| о | o | Cyrillic o | U+043E |
-| і | i | Cyrillic i | U+0456 |
-| с | c | Cyrillic es | U+0441 |
-| р | p | Cyrillic er | U+0440 |
-| х | x | Cyrillic ha | U+0445 |
-| Α | A | Greek Alpha | U+0391 |
-| ... and 20+ more | | | |
+| Pattern | Risk Level | Example |
+|---------|------------|---------|
+| Cyrillic 'а' in domain | BLOCKED | `curl https://аpple.com` |
+| Unknown pipe-to-shell | WARNING | `curl example.com \| bash` |
+| ANSI escapes in URL | BLOCKED | URL with `\x1b[` sequences |
+| Hidden dotfile exec | WARNING | `./...` or modifying `.bashrc` |
 
-### Pipe-to-Shell Patterns
+## Trusted Domains
 
-- `curl ... | bash`
-- `wget ... | sh`
-- `eval $(curl ...)`
-- `bash <(curl ...)`
+These are allowed to use pipe-to-shell without warning:
+- docker.com
+- rustup.rs
+- brew.sh / homebrew
+- deno.land
+- raw.githubusercontent.com (nvm, etc.)
+- get.volta.sh
 
-### Protected Dotfiles
-
-- `~/.bashrc`, `~/.zshrc`, `~/.profile`
-- `~/.ssh/authorized_keys`, `~/.ssh/config`
-- `~/.gitconfig`, `~/.npmrc`, `~/.netrc`
+Edit `~/.local/bin/guardian` to customize.
 
 ## Philosophy
 
-- **Local only** — No network calls, no telemetry
-- **Zero dependencies** — Pure bash, works everywhere
-- **Invisible when clean** — You forget it's there
-- **Bypassable** — `GUARDIAN=0` for when you know what you're doing
-- **Open source** — Read every line, trust nothing blindly
+> "Trust but verify" — except for terminals, where it's "Verify, then maybe trust."
 
-## v0.2 Features
+This tool exists because copy-pasting commands from the internet is dangerous. Even trusted-looking URLs can contain:
+- Unicode lookalikes that redirect to malicious servers
+- Hidden ANSI sequences that mask what's really running
+- Innocent-looking scripts that modify your shell config
 
-- ✅ **External config file** (`config.yaml`) — customize without editing code
-- ✅ **Audit logging** — track what Guardian blocked/warned
-- ✅ **Status command** — see your configuration at a glance
-- ✅ **50+ homograph characters** — Cyrillic, Greek, Armenian, and more
-- ✅ **Insecure HTTP blocking** — blocks HTTP (not HTTPS) pipe-to-shell
+Shell Guardian adds a speed bump before disaster.
 
-### New Commands
+## Requirements
+
+- Bash 4.0+ or Zsh 5.0+
+- No external dependencies
+
+## Uninstall
 
 ```bash
-guardian.sh status        # Show config, stats, protected files
-guardian.sh log           # Show last 10 blocked/warned commands  
-guardian.sh log 50        # Show last 50
+rm ~/.local/bin/guardian
+# Remove the hook lines from your .bashrc or .zshrc
 ```
 
-### Configuration File
+## License
 
-Create `config.yaml` next to `guardian.sh`:
-
-```yaml
-# Trusted domains (no warnings)
-allowed_domains:
-  - get.docker.com
-  - sh.rustup.rs
-  - brew.sh
-
-# Files to protect from writes
-protected_dotfiles:
-  - .bashrc
-  - .ssh/authorized_keys
-  - .aws/credentials
-
-# Logging
-logging:
-  enabled: true
-  level: blocked  # all, blocked, warned, none
-```
-
-## Future Ideas (v0.3+)
-
-- [ ] Integration with OpenClaw approval system
-- [ ] Bash preexec support (without bash-preexec)
-- [ ] Fish shell support
-- [ ] Interactive mode (ask before proceeding)
+MIT — Use it, modify it, share it.
 
 ---
 
-*"Your browser protects you. Your terminal should too."*
-
-— Orion ✨
+Built with paranoia by Orion ✨

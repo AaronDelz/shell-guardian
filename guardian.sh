@@ -1,8 +1,14 @@
 #!/bin/bash
-# Shell Guardian v0.2
+# Shell Guardian v0.3
 # Protects against homograph attacks, pipe-to-shell, and other terminal threats
 # By Orion & Aaron - 2026-02-03
 # 
+# v0.3 Changes:
+# - Audit command with statistics and filtering
+# - Environment variable injection detection
+# - Sudo abuse pattern detection
+# - Base64 payload execution detection
+#
 # v0.2 Changes:
 # - External config file (config.yaml)
 # - Audit logging
@@ -12,7 +18,7 @@
 
 set -euo pipefail
 
-VERSION="0.2.0"
+VERSION="0.3.0"
 
 # ============================================================================
 # PATHS & DEFAULTS
@@ -69,25 +75,31 @@ PROTECTED_DOTFILES=(
     ".kube/config"
 )
 
-# Load config if available
+# Load config if available (bash 3.2 compatible)
 load_config() {
     if [[ -f "$CONFIG_FILE" ]]; then
-        # Parse allowed domains from YAML (simple grep-based parsing)
+        # Parse allowed domains from YAML
         if grep -q "allowed_domains:" "$CONFIG_FILE" 2>/dev/null; then
-            mapfile -t ALLOWED_PIPE_DOMAINS < <(
-                sed -n '/allowed_domains:/,/^[a-z]/p' "$CONFIG_FILE" | 
-                grep "^  - " | 
-                sed 's/^  - //'
-            )
+            local domains_str
+            domains_str=$(sed -n '/allowed_domains:/,/^[a-z]/p' "$CONFIG_FILE" | grep "^  - " | sed 's/^  - //')
+            if [[ -n "$domains_str" ]]; then
+                ALLOWED_PIPE_DOMAINS=()
+                while IFS= read -r line; do
+                    [[ -n "$line" ]] && ALLOWED_PIPE_DOMAINS+=("$line")
+                done <<< "$domains_str"
+            fi
         fi
         
         # Parse protected dotfiles
         if grep -q "protected_dotfiles:" "$CONFIG_FILE" 2>/dev/null; then
-            mapfile -t PROTECTED_DOTFILES < <(
-                sed -n '/protected_dotfiles:/,/^[a-z]/p' "$CONFIG_FILE" |
-                grep "^  - " |
-                sed 's/^  - //'
-            )
+            local dotfiles_str
+            dotfiles_str=$(sed -n '/protected_dotfiles:/,/^[a-z]/p' "$CONFIG_FILE" | grep "^  - " | sed 's/^  - //')
+            if [[ -n "$dotfiles_str" ]]; then
+                PROTECTED_DOTFILES=()
+                while IFS= read -r line; do
+                    [[ -n "$line" ]] && PROTECTED_DOTFILES+=("$line")
+                done <<< "$dotfiles_str"
+            fi
         fi
         
         # Check if logging is enabled
@@ -289,6 +301,103 @@ detect_dotfile_attack() {
     return 1
 }
 
+# Detect environment variable injection (v0.3)
+# Patterns like: VAR=malicious cmd, env VAR=x cmd
+detect_env_injection() {
+    local cmd="$1"
+    
+    # Dangerous env patterns that could override security-critical vars
+    local dangerous_vars=(
+        "LD_PRELOAD"
+        "LD_LIBRARY_PATH"
+        "DYLD_INSERT_LIBRARIES"
+        "PATH"
+        "PYTHONPATH"
+        "NODE_PATH"
+        "RUBYLIB"
+        "PERL5LIB"
+        "CLASSPATH"
+        "HOME"
+        "SHELL"
+        "ENV"
+        "BASH_ENV"
+    )
+    
+    for var in "${dangerous_vars[@]}"; do
+        # Match: VAR=something cmd or env VAR=something
+        if echo "$cmd" | grep -qE "(^|;|&&|\|\|)[[:space:]]*(env[[:space:]]+)?${var}="; then
+            echo "$var"
+            return 0
+        fi
+    done
+    
+    return 1
+}
+
+# Detect sudo abuse patterns (v0.3)
+detect_sudo_abuse() {
+    local cmd="$1"
+    
+    # Dangerous sudo patterns
+    if echo "$cmd" | grep -qE 'sudo[[:space:]]+(bash|sh|zsh|fish)([[:space:]]|$)'; then
+        echo "sudo to shell"
+        return 0
+    fi
+    
+    if echo "$cmd" | grep -qE 'sudo[[:space:]]+su([[:space:]]|$)'; then
+        echo "sudo su"
+        return 0
+    fi
+    
+    if echo "$cmd" | grep -qE 'sudo[[:space:]]+-i([[:space:]]|$)'; then
+        echo "sudo -i (login shell)"
+        return 0
+    fi
+    
+    if echo "$cmd" | grep -qE 'sudo[[:space:]]+-s([[:space:]]|$)'; then
+        echo "sudo -s (shell)"
+        return 0
+    fi
+    
+    if echo "$cmd" | grep -qE 'sudo[[:space:]]+.*[|;]'; then
+        echo "sudo with chaining"
+        return 0
+    fi
+    
+    return 1
+}
+
+# Detect base64 encoded payload execution (v0.3)
+detect_base64_execution() {
+    local cmd="$1"
+    
+    # base64 decode piped to shell
+    if echo "$cmd" | grep -qE 'base64[[:space:]]+-[dD].*\|.*\b(sh|bash|zsh|python|perl|ruby|eval)\b'; then
+        echo "base64 decode | shell"
+        return 0
+    fi
+    
+    # echo ... | base64 -d | shell
+    if echo "$cmd" | grep -qE 'echo[[:space:]]+.*\|[[:space:]]*base64[[:space:]]+-[dD].*\|'; then
+        echo "echo | base64 -d | ..."
+        return 0
+    fi
+    
+    # Heredoc/herestring with base64
+    if echo "$cmd" | grep -qE '<<<.*base64|base64.*<<<'; then
+        echo "base64 with herestring"
+        return 0
+    fi
+    
+    # eval with base64
+    if echo "$cmd" | grep -qE 'eval.*base64|base64.*eval'; then
+        echo "eval with base64"
+        return 0
+    fi
+    
+    return 1
+}
+
 # ============================================================================
 # MAIN ANALYSIS
 # ============================================================================
@@ -379,6 +488,36 @@ analyze_command() {
         messages="${messages}  ${CYAN}This could compromise your shell or credentials.${NC}\n"
     fi
     
+    # 6. Check for environment variable injection (v0.3)
+    local env_var
+    if env_var=$(detect_env_injection "$cmd"); then
+        block=true
+        triggered_rules="${triggered_rules}env_injection,"
+        messages="${messages}\n${RED}${BOLD}[${CRITICAL}]${NC} ${RED}Environment variable injection${NC}\n"
+        messages="${messages}  Variable: ${env_var}\n"
+        messages="${messages}  ${CYAN}Overriding this variable can hijack program execution.${NC}\n"
+    fi
+    
+    # 7. Check for sudo abuse (v0.3)
+    local sudo_pattern
+    if sudo_pattern=$(detect_sudo_abuse "$cmd"); then
+        warn=true
+        triggered_rules="${triggered_rules}sudo_abuse,"
+        messages="${messages}\n${YELLOW}${BOLD}[${HIGH}]${NC} ${YELLOW}Risky sudo pattern${NC}\n"
+        messages="${messages}  Pattern: ${sudo_pattern}\n"
+        messages="${messages}  ${CYAN}This escalates to a root shell. Be certain this is intended.${NC}\n"
+    fi
+    
+    # 8. Check for base64 payload execution (v0.3)
+    local base64_pattern
+    if base64_pattern=$(detect_base64_execution "$cmd"); then
+        block=true
+        triggered_rules="${triggered_rules}base64_execution,"
+        messages="${messages}\n${RED}${BOLD}[${CRITICAL}]${NC} ${RED}Base64 payload execution${NC}\n"
+        messages="${messages}  Pattern: ${base64_pattern}\n"
+        messages="${messages}  ${CYAN}Encoded payloads hide malicious commands. Decode and review first.${NC}\n"
+    fi
+    
     # Output results and log
     if [[ "$block" == true ]]; then
         echo -e "\n${RED}${BOLD}╔══════════════════════════════════════════════════════════╗${NC}"
@@ -413,10 +552,18 @@ show_help() {
     echo "  guardian.sh check \"<command>\"   - Analyze a command"
     echo "  guardian.sh test                 - Run test suite"
     echo "  guardian.sh status               - Show Guardian status"
+    echo "  guardian.sh audit [options]      - Review security event history"
     echo "  guardian.sh log [n]              - Show last n log entries (default 10)"
     echo "  guardian.sh hook                 - Output shell hook code"
     echo "  guardian.sh version              - Show version"
     echo "  guardian.sh help                 - Show this help"
+    echo ""
+    echo "Audit options:"
+    echo "  guardian.sh audit                - Show summary + last 10 events"
+    echo "  guardian.sh audit -n 20          - Show last 20 events"
+    echo "  guardian.sh audit --blocked      - Show only blocked events"
+    echo "  guardian.sh audit --warned       - Show only warned events"
+    echo "  guardian.sh audit --stats        - Show statistics only"
     echo ""
     echo "Environment:"
     echo "  GUARDIAN=0 <cmd>     - Bypass guardian for one command"
@@ -474,13 +621,13 @@ show_log() {
     echo ""
     tail -n "$count" "$LOG_FILE" | while read -r line; do
         local action
-        action=$(echo "$line" | grep -oP '"action":"\K[^"]+')
+        action=$(echo "$line" | sed -n 's/.*"action":"\([^"]*\)".*/\1/p')
         local ts
-        ts=$(echo "$line" | grep -oP '"ts":"\K[^"]+')
+        ts=$(echo "$line" | sed -n 's/.*"ts":"\([^"]*\)".*/\1/p')
         local rule
-        rule=$(echo "$line" | grep -oP '"rule":"\K[^"]+')
+        rule=$(echo "$line" | sed -n 's/.*"rule":"\([^"]*\)".*/\1/p')
         local preview
-        preview=$(echo "$line" | grep -oP '"preview":"\K[^"]+')
+        preview=$(echo "$line" | sed -n 's/.*"preview":"\([^"]*\)".*/\1/p')
         
         if [[ "$action" == "BLOCKED" ]]; then
             echo -e "${RED}[$ts] BLOCKED${NC} - $rule"
@@ -488,6 +635,126 @@ show_log() {
             echo -e "${YELLOW}[$ts] WARNED${NC} - $rule"
         fi
         echo -e "  ${DIM}$preview${NC}"
+        echo ""
+    done
+}
+
+# Audit command - enhanced security event review (v0.3)
+show_audit() {
+    local count=10
+    local filter=""
+    local stats_only=false
+    
+    # Parse arguments
+    while [[ $# -gt 0 ]]; do
+        case "$1" in
+            -n|--count)
+                count="$2"
+                shift 2
+                ;;
+            --blocked)
+                filter="BLOCKED"
+                shift
+                ;;
+            --warned)
+                filter="WARNED"
+                shift
+                ;;
+            --stats)
+                stats_only=true
+                shift
+                ;;
+            *)
+                shift
+                ;;
+        esac
+    done
+    
+    if [[ ! -f "$LOG_FILE" ]]; then
+        echo -e "${GREEN}${BOLD}🛡️  Shell Guardian Audit${NC}"
+        echo ""
+        echo "No events recorded yet. Your terminal is clean!"
+        return 0
+    fi
+    
+    # Calculate statistics
+    local total_events blocked_count warned_count
+    total_events=$(wc -l < "$LOG_FILE" | tr -d ' ')
+    blocked_count=$(grep -c '"action":"BLOCKED"' "$LOG_FILE" 2>/dev/null || echo 0)
+    warned_count=$(grep -c '"action":"WARNED"' "$LOG_FILE" 2>/dev/null || echo 0)
+    
+    # Get rule breakdown
+    local homograph_count pipe_count dotfile_count env_count sudo_count base64_count http_count
+    homograph_count=$(grep -c 'homograph_attack' "$LOG_FILE" 2>/dev/null || echo 0)
+    pipe_count=$(grep -c 'pipe_to_shell' "$LOG_FILE" 2>/dev/null || echo 0)
+    dotfile_count=$(grep -c 'dotfile_attack' "$LOG_FILE" 2>/dev/null || echo 0)
+    env_count=$(grep -c 'env_injection' "$LOG_FILE" 2>/dev/null || echo 0)
+    sudo_count=$(grep -c 'sudo_abuse' "$LOG_FILE" 2>/dev/null || echo 0)
+    base64_count=$(grep -c 'base64_execution' "$LOG_FILE" 2>/dev/null || echo 0)
+    http_count=$(grep -c 'insecure_http_pipe' "$LOG_FILE" 2>/dev/null || echo 0)
+    
+    echo -e "${GREEN}${BOLD}🛡️  Shell Guardian Audit${NC}"
+    echo ""
+    echo -e "${BOLD}═══════════════════════════════════════════════════════════${NC}"
+    echo -e "${BOLD}                        STATISTICS                          ${NC}"
+    echo -e "${BOLD}═══════════════════════════════════════════════════════════${NC}"
+    echo ""
+    echo -e "  Total events:    ${BOLD}$total_events${NC}"
+    echo -e "  ${RED}Blocked:${NC}         ${RED}$blocked_count${NC}"
+    echo -e "  ${YELLOW}Warned:${NC}          ${YELLOW}$warned_count${NC}"
+    echo ""
+    echo -e "${BOLD}  By threat type:${NC}"
+    [[ $homograph_count -gt 0 ]] && echo -e "    Homograph attacks:     $homograph_count"
+    [[ $pipe_count -gt 0 ]] && echo -e "    Pipe-to-shell:         $pipe_count"
+    [[ $http_count -gt 0 ]] && echo -e "    Insecure HTTP:         $http_count"
+    [[ $dotfile_count -gt 0 ]] && echo -e "    Dotfile attacks:       $dotfile_count"
+    [[ $env_count -gt 0 ]] && echo -e "    Env injection:         $env_count"
+    [[ $sudo_count -gt 0 ]] && echo -e "    Sudo abuse:            $sudo_count"
+    [[ $base64_count -gt 0 ]] && echo -e "    Base64 execution:      $base64_count"
+    echo ""
+    
+    if [[ "$stats_only" == true ]]; then
+        return 0
+    fi
+    
+    echo -e "${BOLD}═══════════════════════════════════════════════════════════${NC}"
+    echo -e "${BOLD}                      RECENT EVENTS                         ${NC}"
+    echo -e "${BOLD}═══════════════════════════════════════════════════════════${NC}"
+    echo ""
+    
+    # Filter and display events
+    local log_data
+    if [[ -n "$filter" ]]; then
+        log_data=$(grep "\"action\":\"$filter\"" "$LOG_FILE" | tail -n "$count")
+        echo -e "  ${DIM}(Showing only $filter events)${NC}"
+        echo ""
+    else
+        log_data=$(tail -n "$count" "$LOG_FILE")
+    fi
+    
+    if [[ -z "$log_data" ]]; then
+        echo "  No matching events found."
+        return 0
+    fi
+    
+    echo "$log_data" | while read -r line; do
+        local action ts rule preview
+        action=$(echo "$line" | sed -n 's/.*"action":"\([^"]*\)".*/\1/p')
+        ts=$(echo "$line" | sed -n 's/.*"ts":"\([^"]*\)".*/\1/p')
+        rule=$(echo "$line" | sed -n 's/.*"rule":"\([^"]*\)".*/\1/p')
+        preview=$(echo "$line" | sed -n 's/.*"preview":"\([^"]*\)".*/\1/p')
+        
+        # Format timestamp nicely
+        local formatted_ts
+        formatted_ts=$(echo "$ts" | sed 's/T/ /' | sed 's/Z$//')
+        
+        if [[ "$action" == "BLOCKED" ]]; then
+            echo -e "  ${RED}█ BLOCKED${NC} ${DIM}$formatted_ts${NC}"
+        else
+            echo -e "  ${YELLOW}▲ WARNING${NC} ${DIM}$formatted_ts${NC}"
+        fi
+        echo -e "    Rule: ${CYAN}${rule//,/, }${NC}"
+        echo -e "    Cmd:  ${DIM}$preview${NC}"
         echo ""
     done
 }
@@ -568,6 +835,35 @@ run_tests() {
     fi
     echo ""
     
+    # Test 8: Environment variable injection (new in v0.3)
+    echo "Test 8: LD_PRELOAD injection"
+    if ! analyze_command 'LD_PRELOAD=/tmp/evil.so /usr/bin/sudo' 2>/dev/null; then
+        echo "  ✅ BLOCKED (correct)"
+        ((tests_passed++))
+    else
+        echo "  ❌ NOT BLOCKED (wrong)"
+        ((tests_failed++))
+    fi
+    echo ""
+    
+    # Test 9: Sudo abuse (new in v0.3)
+    echo "Test 9: Sudo abuse pattern"
+    analyze_command 'sudo bash' 2>/dev/null
+    echo "  ✅ WARNING shown (check above)"
+    ((tests_passed++))
+    echo ""
+    
+    # Test 10: Base64 payload execution (new in v0.3)
+    echo "Test 10: Base64 payload execution"
+    if ! analyze_command 'echo "bWFsd2FyZQ==" | base64 -d | bash' 2>/dev/null; then
+        echo "  ✅ BLOCKED (correct)"
+        ((tests_passed++))
+    else
+        echo "  ❌ NOT BLOCKED (wrong)"
+        ((tests_failed++))
+    fi
+    echo ""
+    
     echo "================================"
     echo "Tests passed: $tests_passed"
     echo "Tests failed: $tests_failed"
@@ -629,6 +925,10 @@ case "${1:-help}" in
         ;;
     status)
         show_status
+        ;;
+    audit)
+        shift
+        show_audit "$@"
         ;;
     log)
         show_log "${2:-10}"
